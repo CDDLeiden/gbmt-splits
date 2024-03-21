@@ -2,48 +2,77 @@
 import os
 import pandas as pd
 from unittest import TestCase
+from parameterized import parameterized
+
+import logging
 
 from rdkit.Chem.rdFingerprintGenerator import GetMorganGenerator
 
 from .split import GloballyBalancedSplit
 from .clustering import RandomClustering, MaxMinClustering, LeaderPickerClustering, MurckoScaffoldClustering
 
+preassigned_smiles = {
+    'Brc1cccc(Nc2nc3c(N4CCCC4)ncnc3s2)c1' : 0,
+    'C#CCn1c(=O)c2c(nc3n2CCCN3C2CCC2)n(C)c1=O' : 1,
+}
+
+logging.basicConfig(level=logging.DEBUG)
+
 
 class TestSplits(TestCase):
 
     test_data_path = os.path.join(os.path.dirname(__file__), 'test_data.csv')
     seed = 2022
-    time_limit = None
+    time_limit = 10
 
-    def test_random_split(self):
+    @parameterized.expand([
+        ([0.9, 0.1], None,), 
+        ([0.9, 0.1], preassigned_smiles,),
+        ])
+
+    def test_random_split(self, sizes, preassigned_smiles):
 
         data = pd.read_csv(self.test_data_path)
         ncols = data.shape[1]
         clustering = RandomClustering(seed=self.seed)
         splitter = GloballyBalancedSplit(
-            sizes = [0.9, 0.1], 
+            sizes = sizes,
             clustering_method = clustering,
             time_limit_seconds=self.time_limit,
         )
-        data = splitter(data)
+        data = splitter(data, preassigned_smiles=preassigned_smiles)
 
         assert data.shape[1] == ncols + 2
         assert data.Split.nunique() == 2
 
-    def test_dissimilarity_maxmin_split(self):
+        if preassigned_smiles is not None:
+            for smiles, subset in preassigned_smiles.items():
+                assert data.loc[data['SMILES'] == smiles, 'Split'].values[0] == subset
+
+
+    @parameterized.expand([
+        ([0.7, 0.1, 0.1, 0.1], None,), 
+        ([0.7, 0.1, 0.1, 0.1], preassigned_smiles,),
+        ])
+    
+    def test_dissimilarity_maxmin_split(self, sizes, preassigned_smiles):
             
         data = pd.read_csv(self.test_data_path)
         ncols = data.shape[1]
-        clustering = MaxMinClustering(seed=self.seed, n_clusters=10)
+        clustering = MaxMinClustering(seed=self.seed)
         splitter = GloballyBalancedSplit(
-            sizes = [0.7, 0.1, 0.1, 0.1], 
+            sizes = sizes, 
             clustering_method = clustering,
             time_limit_seconds=self.time_limit,
         )
-        data = splitter(data)
+        data = splitter(data, preassigned_smiles=preassigned_smiles)
 
         assert data.shape[1] == ncols + 2
         assert data.Split.nunique() == 4
+
+        if preassigned_smiles is not None:
+            for smiles, subset in preassigned_smiles.items():
+                assert data.loc[data['SMILES'] == smiles, 'Split'].values[0] == subset
 
     def test_dissimilarity_leader_split(self):
             
@@ -84,7 +113,8 @@ class TestSplits(TestCase):
         splitter = GloballyBalancedSplit(
             clustering_method = clustering,
             time_limit_seconds=self.time_limit,
-            n_splits=3
+            n_splits=3,
+            absolute_gap = 1e-3,
         )
         data = splitter(data)
 

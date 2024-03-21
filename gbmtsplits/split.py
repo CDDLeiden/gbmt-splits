@@ -1,16 +1,15 @@
-import tqdm
 
 import numpy as np
 import pandas as pd
 
 from pulp import *
-from typing import List, Dict, Callable
-from abc import ABC, abstractmethod
+from typing import Callable
 
 from rdkit import Chem, DataStructs
 from rdkit.Chem.rdFingerprintGenerator import GetMorganGenerator
 
 from .clustering import MaxMinClustering, LeaderPickerClustering, MurckoScaffoldClustering, RandomClustering
+from .logs import logger
 
 class GloballyBalancedSplit:
 
@@ -19,18 +18,18 @@ class GloballyBalancedSplit:
 
     Attributes
     ----------
-    sizes : List[int], optional
-        List of sizes of the splits.
+    sizes : list[int], optional
+        list of sizes of the splits.
     clusters : dict, optional
-        Dictionary of clusters, where keys are cluster indices and values are indices of molecules.
+        dictionary of clusters, where keys are cluster indices and values are indices of molecules.
     clustering_method : Callable, optional
         Clustering method.
     n_splits : int, optional
         Number of splits.
     equal_weight_perc_compounds_as_tasks : bool, optional
         Whether to weight the tasks equally or not.
-    relative_gap : float, optional  
-        Relative gap for the linear programming problem.
+    absolute_gap : float, optional  
+        Absolute gap between the absolute optimal objective and the current one at which the solver stops and returns a solution.
     time_limit_seconds : int, optional
         Time limit for the linear programming problem.
     n_jobs : int, optional
@@ -41,15 +40,17 @@ class GloballyBalancedSplit:
 
     def __init__(
             self,
-            sizes : List[int] = [0.8, 0.1, 0.1],
+            sizes : list[int] = [0.8, 0.1, 0.1],
             clusters : dict = None,
             clustering_method : Callable | None = MaxMinClustering(),
             n_splits : int = 1,
             equal_weight_perc_compounds_as_tasks : bool = True,
-            relative_gap : float = 0.1,
+            absolute_gap : float = 1e-3,
             time_limit_seconds : int = None,
             n_jobs : int = 1,
-            min_distance : bool = True,    
+            min_distance : bool = True,  
+            stratify : bool = True,
+            stratify_reg_nbins : int = 5,  
             ) -> None:     
         
         if clusters is None and clustering_method is None:
@@ -62,17 +63,20 @@ class GloballyBalancedSplit:
         self.clustering_method = clustering_method
         self.n_splits = n_splits
         self.equal_weight_perc_compounds_as_tasks = equal_weight_perc_compounds_as_tasks
-        self.relative_gap = relative_gap
+        self.absolute_gap = absolute_gap
         self.time_limit_seconds = time_limit_seconds
         self.n_jobs = n_jobs
         self.min_distance = min_distance
+        self.stratify = stratify
+        self.stratify_reg_nbins = stratify_reg_nbins
 
     def __call__(
             self,
             data : pd.DataFrame,
             smiles_column : str = 'SMILES',
-            tasks : List[str] = None,
-            ignore_columns : List[str] = None,
+            tasks : list[str] = None,
+            ignore_columns : list[str] = None,
+            preassigned_smiles : dict[str, int] = None,
             ) -> pd.DataFrame:
         
         """
@@ -84,10 +88,10 @@ class GloballyBalancedSplit:
             Dataframe with SMILES strings and tasks.
         smiles_column : str, optional
             Name of the column with SMILES strings.
-        tasks : List[str], optional
-            List of task columns.
-        ignore_columns : List[str], optional
-            List of columns to ignore.
+        tasks : list[str], optional
+            list of task columns.
+        ignore_columns : list[str], optional
+            list of columns to ignore.
         
         Returns
         -------
@@ -107,10 +111,12 @@ class GloballyBalancedSplit:
         self.df = data.copy()
         self.smiles_column = smiles_column
         self.ignore_columns = ignore_columns
+        self.preassigned_smiles = preassigned_smiles
         
         # Save the original tasks and create the tasks for balancing
         self._set_original_tasks(tasks)
         self._set_tasks_for_balancing()
+
 
         smiles_list = self.df[smiles_column].tolist()
 
@@ -125,29 +131,34 @@ class GloballyBalancedSplit:
 
             txt = f' {split_name} '
             n = int((80 - len(txt)) / 2)
-            print('=' * n + txt + '=' * n)
-            print(f'Clustering method: {self.clustering_method.get_name() if self.clustering_method else "precomputed clusters"}')
-            print(f'Original tasks: {self.original_tasks}')
-            print(f'Tasks for balancing: {self.tasks_for_balancing}')
-            print(f'Subset sizes: {self.sizes}')
+            logger.info('=' * n + txt + '=' * n)
+            logger.info(f'Clustering method: {self.clustering_method.get_name() if self.clustering_method else "precomputed clusters"}')
+            logger.info(f'Original tasks: {self.original_tasks}')
+            logger.info(f'Tasks for balancing: {self.tasks_for_balancing}')
+            logger.info(f'Subset sizes: {self.sizes}')
 
             # Cluster molecules
             if self.clusters :
                 clusters = self.clusters
             else:
-                clusters = self.clustering_method(smiles_list)
-            print(f'Number of initial clusters: {len(clusters)}')
+                clusters = self.clustering_method(smiles_list, )
+            logger.info(f'Number of initial clusters: {len(clusters)}')
+            
+            # Get clusters indices of pre-assigned molecules
+            preassigned_clusters = self._get_preassigned_clusters(clusters) if preassigned_smiles else None
             # Compute the number of self.dfpoints per task for each cluster
             tasks_per_cluster = self._compute_tasks_per_cluster(self.tasks_for_balancing, clusters)
-            
+                     
             # Merge the clusters with a linear programming method to create the subsets
             merged_clusters_mapping = self._merge_clusters_with_balancing_mapping(
                 tasks_per_cluster, 
                 self.sizes, 
                 self.equal_weight_perc_compounds_as_tasks, 
-                self.relative_gap,
+                self.absolute_gap,
                 self.time_limit_seconds if self.time_limit_seconds else self.get_default_time_limit_seconds(len(smiles_list), len(self.tasks_for_balancing)),
-                self.n_jobs)  
+                self.n_jobs,
+                preassigned_clusters)  
+
             for i, idx in clusters.items(): 
                 self.df.loc[idx, split_name] = merged_clusters_mapping[i]-1
 
@@ -173,6 +184,9 @@ class GloballyBalancedSplit:
         # Drop the tasks for balancing
         cols2drop = [col for col in self.tasks_for_balancing if col not in self.original_tasks]
         self.df.drop(cols2drop, axis=1, inplace=True)
+
+
+        logger.info('=' * 80)
 
         return self.df
     
@@ -200,25 +214,25 @@ class GloballyBalancedSplit:
         tmin = 10
         tmax = 60 * 60
         tlim = min(tmax, max(tmin, tmol * ttarget)) 
-        print(f'Time limit (s): {tlim:.0f }')
+        logger.info(f'Time limit: {int(tlim)}s')
         return tlim
 
 
     def _compute_tasks_per_cluster(
             self, 
-            tasks : List[str],
-            clusters : Dict[int, List[int]]
-        ) -> Dict[int, List[str]]:
+            tasks : list[str],
+            clusters : dict[int, list[int]]
+        ) -> dict[int, list[str]]:
         
         """
         Compute the number of datapoints per task for each cluster.
 
         Parameters
         ----------
-        tasks : List[str]
-            List of tasks
-        clusters : Dict[int, List[int]]
-            Dictionary of clusters and list of indices of molecules in the cluster
+        tasks : list[str]
+            list of tasks
+        clusters : dict[int, list[int]]
+            dictionary of clusters and list of indices of molecules in the cluster
 
         Returns
         -------
@@ -236,19 +250,15 @@ class GloballyBalancedSplit:
                 task_vs_clusters[i+1,j] = self.df_per_cluster[task].dropna().shape[0]
 
         return task_vs_clusters  
-    
-    # Bash command to delete conda environment
-    # conda env remove --name myenv
-
         
-    def _set_original_tasks(self, tasks : List[str] | None) -> None:
+    def _set_original_tasks(self, tasks : list[str] | None) -> None:
         """
         Set the original tasks.
         
         Parameters
         ----------
-        tasks : List[str] | None
-            List of task columns.
+        tasks : list[str] | None
+            list of task columns.
         """
 
         if tasks is None:
@@ -269,29 +279,98 @@ class GloballyBalancedSplit:
     def _set_tasks_for_balancing(self) -> None:
 
         """
-        Set the tasks for balancing. If all values for a task are integers, 
-        the task is considered a classification task, and a separate column is
-        created for each class. If the task is not a classification task,
-        the task is considered a regression task, and the task is used as is.
+        Set the tasks for balancing. 
+
+        If stratify is True, the tasks are used to create a column for each class (in case of classification tasks) and
+        bin the data (in case of regression tasks). If stratify is False, the tasks are used as is.
         """
 
+        def is_convertible(value):
+            try:
+                float(value)
+                return True
+            except ValueError:
+                return False
+
         self.tasks_for_balancing = []
-        for task in self.original_tasks:
-            if all( x % 1 == 0 for x in self.df[task].dropna()):
-                for cls in self.df[task].dropna().unique():
-                    self.df[task + '_' + str(cls)] = (self.df[task] == cls).map({True: 1, False: np.nan})
-                    self.tasks_for_balancing.append(f'{task}_{cls}')
-            else:
-                self.tasks_for_balancing.append(task)
+        if self.stratify:
+            for task in self.original_tasks:
+                values = self.df[task].dropna().unique()
+                values_is_numerical = [is_convertible(value) for value in values]
+                
+                # Check if contains non-convertible strings
+                if not (all(values_is_numerical)): # Some non numerical values
+
+                    if any(values_is_numerical): # But some values are numerical
+                        raise ValueError(f'Column {task} contains both numerical and strings values.')
+                    else:
+                        # Create a task per string
+                        for string in values:
+                            key = f'{task}_{string}'
+                            self.df[key] = (self.df[task] == string).map({True: 1, False: np.nan})
+                            self.tasks_for_balancing.append(key)
+                        logger.info(f'String classification {task} stratified into {len(self.df[task].dropna().unique())} tasks.')
+                # Classification: task per class
+                elif all( x % 1 == 0 for x in values):
+                    for cls in values:
+                        key = f'{task}_{int(cls)}'
+                        self.df[key] = (self.df[task] == cls).map({True: 1, False: np.nan})
+                        self.tasks_for_balancing.append(key)
+                    logger.info(f'Classification task {task} stratified into {len(self.df[task].dropna().unique())} tasks.')
+                # Regression: bin data and use as tasks
+                else:
+                    sorted_values = np.sort(values)
+                    bins = np.array_split(sorted_values, self.stratify_reg_nbins)
+                    for i, bin in enumerate(bins):
+                        key = f'{task}_{bin[0]:.2f}_{bin[-1]:.2f}'
+                        self.df[key] = self.df[task].apply(lambda x: x if x in bin else np.nan)
+                        self.tasks_for_balancing.append(key)
+                    logger.info(f'Regression task {task} stratified into {self.stratify_reg_nbins} tasks.')
+        else:
+            self.tasks_for_balancing = self.original_tasks
+
+    def _get_preassigned_clusters(
+            self, 
+            clusters : dict[int, list[int]]) -> dict[int, int]:
+
+        """
+        Get the pre-assigned clusters.
+
+        Parameters
+        ----------
+        clusters : dict[int, list[int]]
+            dictionary of clusters and list of indices of molecules in the clusters.
+        
+        Returns
+        -------
+        dict[int, int]
+            dictionary with cluster indices as keys and subset indices as values.
+        """
+
+        preassigned_clusters = {}
+        for smi, subset in self.preassigned_smiles.items():
+            imol = self.df[self.df[self.smiles_column] == smi].index[0]
+            for idx, cluster in clusters.items():
+                if imol in cluster:
+                    if (idx in preassigned_clusters.keys()) and (subset != preassigned_clusters[idx]):
+                        raise ValueError(f'Pre-assigned cluster {idx} is assigned to multiple subsets.')
+                    preassigned_clusters[idx] = subset
+                    logger.info(f'Cluster {idx} contaning {smi} is preassigned to subset {subset}.')
+                    break
+
+        preassigned_clusters
+        
+        return preassigned_clusters
 
     def _merge_clusters_with_balancing_mapping(
             self, 
             tasks_vs_clusters_array : np.array,
-            sizes : List[float] = [0.9, 0.1, 0.1], 
+            sizes : list[float] = [0.9, 0.1, 0.1], 
             equal_weight_perc_compounds_as_tasks : bool = False,
-            relative_gap : float = 0,
+            absolute_gap : float = 1e-3,
             time_limit_seconds : int = 60*60,
-            max_N_threads : int = 1) -> List[List[int]]:
+            max_N_threads : int = 1,
+            preassigned_clusters : dict[int, int] | None = None) -> list[list[int]]:
             """
             Linear programming function needed to balance the self.df while merging clusters.
 
@@ -314,21 +393,23 @@ class GloballyBalancedSplit:
             equal_weight_perc_compounds_as_tasks : bool
                 - if True, matching the % records will have the same weight as matching the % self.df of individual tasks.
                 - if False, matching the % records will have a weight X times larger than the X tasks.
-            relative_gap : float
-                - the relative gap between the absolute optimal objective and the current one at which the solver
+            absolute_gap : float
+                - the absolute gap between the absolute optimal objective and the current one at which the solver
                 stops and returns a solution. Can be very useful for cases where the exact solution requires
                 far too long to be found to be of any practical use.
-                - set to 0 to obtain the absolute optimal solution (if reached within the time_limit_seconds)
             time_limit_seconds : int
                 - the time limit in seconds for the solver (by default set to 1 hour)
                 - after this time, whatever solution is available is returned
             max_N_threads : int
                 - the maximal number of threads to be used by the solver.
                 - it is advisable to set this number as high as allowed by the available resources.
+            preassigned_clusters : dict
+                - a dictionary of the form {cluster_index: ML_subset_index} to force the clusters to be assigned
+                    to the ML subsets as specified by the user.
             
             Returns
             ------
-            List (of length equal to the number of columns of tasks_vs_clusters_array) of final cluster identifiers
+            list (of length equal to the number of columns of tasks_vs_clusters_array) of final cluster identifiers
                 (integers, numbered from 1 to len(sizes)), mapping each unique initial cluster to its final cluster.
             Example: if sizes == [20, 10, 70], the output will be a list like [3, 3, 1, 2, 1, 3...], where
                 '1' represents the final cluster of relative size 20, '2' the one of relative size 10, and '3' the 
@@ -373,6 +454,12 @@ class GloballyBalancedSplit:
             # Create WML
             sk_harmonic = (1 / fractional_sizes) / np.sum(1 / fractional_sizes)
 
+            # Round all values to have only 3 decimals > reduce computational time
+            A = np.round(A, 3)
+            fractional_sizes = np.round(fractional_sizes, 3)
+            obj_weights = np.round(obj_weights, 3)
+            sk_harmonic = np.round(sk_harmonic, 3)           
+
             # Create the pulp model
             prob = LpProblem("Data_balancing", LpMinimize)
 
@@ -401,6 +488,13 @@ class GloballyBalancedSplit:
             for c in range(N):
                 prob += LpAffineExpression([(x[c+m*N],+1) for m in range(S)]) == 1
 
+            # If preassigned_clusters is pro[int, int]vided, add the constraints to the model to force the clusters
+            # to be assigned to the ML subset preassigned_clusters[t]
+            if preassigned_clusters:
+                for c, subset in preassigned_clusters.items():
+                    # prob += LpAffineExpression(x[c+(subset)*N]) == 1
+                    prob += x[c+(subset)*N] == 1
+
             # Constraints related to the ABS values handling, part 1 and 2
             for m in range(S):
                 for t in range(M):
@@ -409,12 +503,9 @@ class GloballyBalancedSplit:
                     prob += LpAffineExpression([(x[c+m*N],A[t,c]) for c in cs]) + X[t] >= fractional_sizes[m]
 
             # Solve the model
-            prob.solve(PULP_CBC_CMD(gapRel = relative_gap, timeLimit = time_limit_seconds, threads = max_N_threads, msg=False))
-            #solver.tmpDir = "/zfsself.df/self.df/erik/erik-rp1/pQSAR/scaffoldsplit_trial/tmp"
-            #prob.solve(solver)
+            prob.solve(PULP_CBC_CMD(gapAbs = absolute_gap, timeLimit = time_limit_seconds, threads = max_N_threads, msg=False))
 
             # Extract the solution
-
             list_binary_solution = [value(x[i]) for i in range(N * S)]
             list_initial_cluster_indices = [(list(range(N)) * S)[i] for i,l in enumerate(list_binary_solution) if l == 1]
             list_final_ML_subsets = [(list((1 + np.repeat(range(S), N)).astype('int64')))[i] for i,l in enumerate(list_binary_solution) if l == 1]
@@ -444,7 +535,7 @@ class GloballyBalancedSplit:
         # Print header
         txt = f' Min. inter-set Tanimoto distance '
         n = int((80 - len(txt)) / 2)
-        print('-' * n + txt + '-' * n) 
+        logger.info('-' * n + txt + '-' * n) 
 
         # Compute fingerprints
         mols = [ Chem.MolFromSmiles(smi) for smi in self.df[self.smiles_column].tolist() ]
@@ -465,11 +556,11 @@ class GloballyBalancedSplit:
         # Print average and std  of minimum distances per subset
         for subset in sorted(self.df[split_col].unique()):
             dist = self.df[self.df[split_col] == subset][mTd_col] #.to_numpy()
-            print(f'Subset {int(subset)}: {dist.mean():.2f} +/- {dist.std():.2f} | {dist.median():.2f}')
+            logger.info(f'Subset {int(subset)}: {dist.mean():.2f} +/- {dist.std():.2f} | {dist.median():.2f}')
 
         # Chemical dissimilarity score
         cd_score = self.df.groupby(split_col)[mTd_col].median().min()
-        print(f'Chemical dissimilarity score: {cd_score:.2f}')
+        logger.info(f'Chemical dissimilarity score: {cd_score:.2f}')
     
     def _compute_task_balace(self, split_col : str = 'Split'):
 
@@ -485,30 +576,49 @@ class GloballyBalancedSplit:
         # Header
         txt = f' {split_col} balance '
         n = int((80 - len(txt)) / 2)
-        print('-' * n + txt + '-' * n) 
+        logger.info('-' * n + txt + '-' * n) 
+
+
+        # 1. Print out for each balancing task the fraction and number of self.df points per subset
+        # 2. Print out for each original task the fraction and number of self.df points per subset
+        # 3. Print the fraction and number of self.df point per subset for all tasks combined
 
         # Get name of longets task
         longest_task = max(self.tasks_for_balancing, key=len)   
 
-        # Subset balance per task
-        for task in self.tasks_for_balancing:
+        # 1. Print out for each balancing task the fraction and number of self.df points per subset
+        if self.stratify:
+            for task in self.tasks_for_balancing:
+                txt = f'{task} balance:'
+                txt += ' ' * (len(longest_task) - len(task)) + '\t'
+                counts = self.df[[task, split_col]].groupby(split_col).count()
+                n = counts[task].sum()
+                for subset in sorted(self.df[split_col].unique()):
+                    n_subset = counts.loc[subset, task]
+                    txt += f' {int(subset)}: {n_subset/n:.2f} [{n_subset}]\t'
+                logger.info(txt)
+            logger.info('')
+
+        # 2. Print out for each original task the fraction and number of self.df points per subset
+        for task in self.original_tasks:
             txt = f'{task} balance:'
             txt += ' ' * (len(longest_task) - len(task)) + '\t'
             counts = self.df[[task, split_col]].groupby(split_col).count()
             n = counts[task].sum()
             for subset in sorted(self.df[split_col].unique()):
                 n_subset = counts.loc[subset, task]
-                txt += f' {int(subset)}: {n_subset/n:.2f}\t'
-            print(txt)
-        
-        # Overall balance
+                txt += f' {int(subset)}: {n_subset/n:.2f} [{n_subset}]\t'
+            logger.info(txt)
+        logger.info('')
+
+        # 3. Print the fraction and number of self.df point per subset for all tasks combined
         txt = f'Overall balance:' + ' ' * (len(longest_task) - len(task)) + '\t'
-        counts = self.df[self.tasks_for_balancing].sum(axis=1).groupby(self.df[split_col]).sum()
-        n = counts.sum()
+        n = self.df.shape[0]
         balance_score = 0
-        for i, subset in enumerate(sorted(self.df[split_col].unique())):
-            n_subset = counts.loc[subset]
-            txt += f' {int(subset)}: {n_subset/n:.2f}\t'
+        subsets = sorted(self.df[split_col].unique())
+        for i, subset in enumerate(subsets):
+            n_subset = self.df[self.df[split_col] == subset].shape[0]
+            txt += f' {int(subset)}: {n_subset/n:.2f} [{n_subset}]\t'
             balance_score += np.abs(n_subset/n - self.sizes[i])
-        print(txt)
-        print(f'Balance score: {balance_score/len(self.sizes):.4f}')
+        logger.info(txt)
+        logger.info(f'Balance score: {balance_score/len(self.sizes):.4f}')
