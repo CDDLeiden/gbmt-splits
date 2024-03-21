@@ -20,7 +20,7 @@ jobs:
       run: |
         pip install -e .
     - name: Run tests
-      run: python -m unittest discover
+      run: python -m unittest discover tests/
 
   # macos:
   #   runs-on: macos-latest
