@@ -8,8 +8,8 @@ import logging
 
 from rdkit.Chem.rdFingerprintGenerator import GetMorganGenerator
 
-from .split import GloballyBalancedSplit
-from .clustering import RandomClustering, MaxMinClustering, LeaderPickerClustering, MurckoScaffoldClustering
+from gbmtsplits.split import GloballyBalancedSplit
+from gbmtsplits.clustering import RandomClustering, MaxMinClustering, LeaderPickerClustering, MurckoScaffoldClustering
 
 preassigned_smiles = {
     'Brc1cccc(Nc2nc3c(N4CCCC4)ncnc3s2)c1' : 0,
