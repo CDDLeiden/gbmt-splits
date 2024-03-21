@@ -20,6 +20,7 @@ classifiers = [
 ]
 
 dependencies = [
+    "gitpython",
     "parameterized",
     "matplotlib",
     "seaborn",
@@ -31,8 +32,5 @@ dependencies = [
     "pulp"
 ]
 
-[tool.setuptools.packages.find]
-where = ["."]
-
 [tool.setuptools_scm]
-write_to = "gbmtsplits/_version.py"
+write_to = "src/gbmtsplits/_version.py"
