@@ -1,20 +1,14 @@
-import tqdm
-
 import numpy as np
-import pandas as pd
 
-from pulp import *
-from typing import List, Dict
+from typing import List
 from abc import ABC, abstractmethod
 
-from typing import Literal, Callable
+from typing import Callable
 
 from rdkit import Chem, DataStructs
 from rdkit.Chem.Scaffolds import MurckoScaffold
 from rdkit.SimDivFilters import rdSimDivPickers
 from rdkit.Chem.rdFingerprintGenerator import GetMorganGenerator
-
-from time import time as timer
 
 class ClusteringMethod(ABC):
 

@@ -1,14 +1,13 @@
-
 import numpy as np
 import pandas as pd
 
-from pulp import *
+from pulp import LpAffineExpression, PULP_CBC_CMD, value, LpProblem, LpMinimize, LpVariable
 from typing import Callable
 
 from rdkit import Chem, DataStructs
 from rdkit.Chem.rdFingerprintGenerator import GetMorganGenerator
 
-from .clustering import MaxMinClustering, LeaderPickerClustering, MurckoScaffoldClustering, RandomClustering
+from .clustering import MaxMinClustering, RandomClustering
 from .logs import logger
 
 class GloballyBalancedSplit:
@@ -533,7 +532,7 @@ class GloballyBalancedSplit:
         """
 
         # Print header
-        txt = f' Min. inter-set Tanimoto distance '
+        txt = ' Min. inter-set Tanimoto distance '
         n = int((80 - len(txt)) / 2)
         logger.info('-' * n + txt + '-' * n) 
 
@@ -612,7 +611,7 @@ class GloballyBalancedSplit:
         logger.info('')
 
         # 3. Print the fraction and number of self.df point per subset for all tasks combined
-        txt = f'Overall balance:' + ' ' * (len(longest_task) - len(task)) + '\t'
+        txt = 'Overall balance:' + ' ' * (len(longest_task) - len(task)) + '\t'
         n = self.df.shape[0]
         balance_score = 0
         subsets = sorted(self.df[split_col].unique())
