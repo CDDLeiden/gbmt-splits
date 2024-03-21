@@ -2,7 +2,7 @@ import os
 import argparse
 import pandas as pd
 from timeit import default_timer as timer
-from .logs.config import enable_logging
+from .logs.config import enable_file_logger
 from .split import GloballyBalancedSplit
 from .clustering import RandomClustering, LeaderPickerClustering, MaxMinClustering, MurckoScaffoldClustering
 
