@@ -486,6 +486,10 @@ class GloballyBalancedSplit:
             # Constraints forcing each cluster to be in one and only one ML_subset
             for c in range(N):
                 prob += LpAffineExpression([(x[c+m*N],+1) for m in range(S)]) == 1
+                
+            # Constraints forcing each ML_subset to be non-empty
+            for m in range(S):
+                prob += LpAffineExpression([(x[i],+1) for i in range(m*N,(m+1)*N)]) >= 1
 
             # If preassigned_clusters is pro[int, int]vided, add the constraints to the model to force the clusters
             # to be assigned to the ML subset preassigned_clusters[t]
@@ -498,8 +502,8 @@ class GloballyBalancedSplit:
             for m in range(S):
                 for t in range(M):
                     cs = [c for c in range(N) if A[t,c] != 0]
-                    prob += LpAffineExpression([(x[c+m*N],A[t,c]) for c in cs]) - X[t] <= fractional_sizes[m]
-                    prob += LpAffineExpression([(x[c+m*N],A[t,c]) for c in cs]) + X[t] >= fractional_sizes[m]
+                    prob += LpAffineExpression([(x[c+m*N],A[t,c]) for c in cs]) - X[m] <= fractional_sizes[m]
+                    prob += LpAffineExpression([(x[c+m*N],A[t,c]) for c in cs]) + X[m] >= fractional_sizes[m]
 
             # Solve the model
             prob.solve(PULP_CBC_CMD(gapAbs = absolute_gap, timeLimit = time_limit_seconds, threads = max_N_threads, msg=False))
